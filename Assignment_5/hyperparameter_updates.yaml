@@ -1,0 +1,11 @@
+status: Ignore
+updates:
+  epsilon:
+    action: add
+    value: 0
+  epsilon_decay:
+    action: mul
+    value: 0.5
+  learning_rate:
+    action: mul
+    value: 1
