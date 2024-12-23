@@ -10,12 +10,12 @@ from PIL import Image
 import os
 from datetime import datetime
 import yaml
+import gc
 
 
 class DQN(nn.Module):
     def __init__(self, input_channels=4, n_actions=2):
         super(DQN, self).__init__()
-        # Using LeakyReLU with a default negative slope of 0.01
         self.conv_layers = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=8, stride=4),
             nn.LeakyReLU(0.01),
@@ -33,7 +33,7 @@ class DQN(nn.Module):
 
     def forward(self, x):
         x = self.conv_layers(x)
-        x = x.view(x.size(0), -1)  # Flatten
+        x = x.view(x.size(0), -1)
         return self.fc_layers(x)
 
 
@@ -43,67 +43,75 @@ class FrameStack:
         self.frames = deque(maxlen=size)
 
     def push(self, frame):
+        # Ensure frame is detached from computation graph and on CPU
+        if torch.is_tensor(frame):
+            frame = frame.cpu().detach()
         self.frames.append(frame)
 
     def get_state(self):
-        # If we don't have enough frames, duplicate the last frame
         while len(self.frames) < self.size:
             if len(self.frames) > 0:
                 self.frames.append(self.frames[-1])
             else:
-                # Create a zero tensor with same shape as expected frame: [1, 1, 84, 84]
                 zero_frame = torch.zeros(1, 1, 84, 84)
                 self.frames.append(zero_frame)
 
-        # Stack frames along channel dimension
-        return torch.cat(list(self.frames), dim=1)  # Will give [1, 4, 84, 84]
+        # Stack frames and detach to prevent memory leaks
+        stacked = torch.cat(list(self.frames), dim=1)
+        return stacked.detach()
+
+    def clear(self):
+        self.frames.clear()
 
 
 class ReplayBuffer:
-    def __init__(self, capacity=100000):
+    def __init__(self, capacity=10000):  # Reduced capacity
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
+        # Move tensors to CPU and detach from computation graph
+        if torch.is_tensor(state):
+            state = state.cpu().detach()
+        if torch.is_tensor(next_state):
+            next_state = next_state.cpu().detach()
+
         self.buffer.append((state, action, reward, next_state, done))
 
     def sample(self, batch_size):
-        state, action, reward, next_state, done = zip(*random.sample(self.buffer, batch_size))
-        return (torch.cat(state),
-                torch.tensor(action),
-                torch.tensor(reward),
-                torch.cat(next_state),
-                torch.tensor(done))
+        samples = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = zip(*samples)
+
+        # Stack all states efficiently
+        states = torch.cat(states)
+        next_states = torch.cat(next_states)
+        actions = torch.tensor(actions)
+        rewards = torch.tensor(rewards)
+        dones = torch.tensor(dones)
+
+        return states, actions, rewards, next_states, dones
 
     def __len__(self):
         return len(self.buffer)
 
+    def clear(self):
+        self.buffer.clear()
+
 
 def preprocess_image(image):
-    """
-    Preprocess the image by converting it to grayscale, cropping the bottom, and resizing it.
-    Returns the image as a PyTorch tensor.
-    """
-    # Convert to PIL Image for processing
     pil_image = Image.fromarray(image)
-
-    # Get image dimensions
     width, height = pil_image.size
-
-    # Crop the bottom portion (remove approximately 20% from bottom)
-    crop_height = int(height * 0.8)  # Keep top 80%
+    crop_height = int(height * 0.8)
     cropped_image = pil_image.crop((0, 0, width, crop_height))
-
-    # Convert to grayscale
     grayscale_image = cropped_image.convert("L")
-
-    # Resize the image to a fixed size (84x84)
     resized_image = grayscale_image.resize((84, 84))
-
-    # Convert to numpy array and normalize
     preprocessed_image = np.array(resized_image) / 255.0
-
-    # Convert to PyTorch tensor and add batch and channel dimensions
     tensor_image = torch.FloatTensor(preprocessed_image).unsqueeze(0).unsqueeze(0)
+
+    # Clean up PIL Images
+    del pil_image
+    del cropped_image
+    del grayscale_image
+    del resized_image
 
     return tensor_image
 
@@ -112,17 +120,17 @@ class DQNAgent:
     def __init__(self, env):
         self.env = env
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.policy_net = DQN(input_channels=4).to(self.device)  # Changed to 4 input channels
-        self.target_net = DQN(input_channels=4).to(self.device)  # Changed to 4 input channels
+        self.policy_net = DQN(input_channels=4).to(self.device)
+        self.target_net = DQN(input_channels=4).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.frame_stack = FrameStack(size=4)  # Add frame stack
+        self.frame_stack = FrameStack(size=4)
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.00025)
-        self.memory = ReplayBuffer()
+        self.memory = ReplayBuffer(capacity=50000)
 
         self.batch_size = 32
-        self.gamma = 0.95
-        self.epsilon_start = 0.5
+        self.gamma = 0.99
+        self.epsilon_start = 0.2
         self.epsilon_end = 0.05
         self.epsilon_decay = 300
         self.current_epsilon = self.epsilon_start
@@ -142,12 +150,16 @@ class DQNAgent:
         with torch.no_grad():
             state = state.to(self.device)
             q_values = self.policy_net(state)
-            return q_values.max(1)[1].item()
+            action = q_values.max(1)[1].item()
+            # Clean up
+            del q_values
+            return action
 
     def optimize_model(self):
         if len(self.memory) < self.batch_size:
             return
 
+        # Sample and move to device
         states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
         states = states.to(self.device)
         actions = actions.to(self.device)
@@ -155,16 +167,26 @@ class DQNAgent:
         next_states = next_states.to(self.device)
         dones = dones.to(self.device)
 
+        # Compute loss
+        with torch.no_grad():
+            next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
+            next_q_values = self.target_net(next_states).gather(1, next_actions)
+            expected_q_values = rewards.unsqueeze(1) + (1 - dones.float().unsqueeze(1)) * self.gamma * next_q_values
+
         current_q_values = self.policy_net(states).gather(1, actions.unsqueeze(1))
-        next_q_values = self.target_net(next_states).max(1)[0].detach()
-        expected_q_values = rewards + (1 - dones.float()) * self.gamma * next_q_values
+        loss = nn.MSELoss()(current_q_values, expected_q_values)
 
-        loss = nn.MSELoss()(current_q_values, expected_q_values.unsqueeze(1))
-
+        # Optimize
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 10)
         self.optimizer.step()
+
+        # Clean up
+        del states, actions, rewards, next_states, dones
+        del next_actions, next_q_values, expected_q_values, current_q_values
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def update_hyperparameters(self):
         """Update hyperparameters based on the YAML configuration"""
@@ -248,15 +270,20 @@ class DQNAgent:
         else:
             raise FileNotFoundError(f"No model found at {model_path}")
 
+    def clear_memory(self):
+        self.memory.clear()
+        self.frame_stack.clear()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def train(self, num_episodes=2000000, start_episode=None, load_existing=True):
-        """Modified train method with optional model loading"""
         os.makedirs('models', exist_ok=True)
         os.makedirs('images', exist_ok=True)
 
         rewards_history = deque(maxlen=100)
         best_reward = float('-inf')
 
-        # Load previous model if specified and load_existing is True
         if start_episode is not None and load_existing:
             try:
                 episode_num, last_reward = self.load_model(start_episode)
@@ -267,93 +294,105 @@ class DQNAgent:
                 print(f"No existing model found for episode {start_episode}, starting fresh")
                 start_episode = 0
         else:
-            print("Starting fresh training run")
             start_episode = 0
 
-        for episode in range(start_episode, num_episodes):
-            state, _ = self.env.reset()
-            frame = preprocess_image(self.env.render())
+        try:
+            for episode in range(start_episode, num_episodes):
+                state, _ = self.env.reset()
+                frame = preprocess_image(self.env.render())
 
-            # Initialize frame stack with first frame
-            self.frame_stack = FrameStack(size=4)
-            for _ in range(4):
-                self.frame_stack.push(frame)
-            state = self.frame_stack.get_state()
+                self.frame_stack = FrameStack(size=4)
+                for _ in range(4):
+                    self.frame_stack.push(frame)
+                state = self.frame_stack.get_state()
 
-            episode_reward = 0
-            done = False
+                episode_reward = 0
+                done = False
 
-            while not done:
-                action = self.select_action(state)
+                while not done:
+                    action = self.select_action(state)
 
-                # Frame skipping
-                skip_reward = 0
-                for _ in range(self.frame_skip):
-                    next_state, reward, done, truncated, _ = self.env.step(action)
-                    skip_reward += reward
-                    if done:
-                        break
+                    skip_reward = 0
+                    for _ in range(self.frame_skip):
+                        next_state, reward, done, truncated, _ = self.env.step(action)
+                        skip_reward += reward
+                        if done:
+                            break
 
-                next_frame = preprocess_image(self.env.render())
-                self.frame_stack.push(next_frame)
-                next_state = self.frame_stack.get_state()
+                    next_frame = preprocess_image(self.env.render())
+                    self.frame_stack.push(next_frame)
+                    next_state = self.frame_stack.get_state()
 
-                # Store transition in memory
-                self.memory.push(state, action, skip_reward, next_state, done)
+                    self.memory.push(state, action, skip_reward, next_state, done)
+                    self.optimize_model()
 
-                # Optimize model
-                self.optimize_model()
+                    state = next_state
+                    episode_reward += skip_reward
+                    self.steps_done += 1
 
-                state = next_state
-                episode_reward += skip_reward
-                self.steps_done += 1
+                    if self.steps_done % self.target_update == 0:
+                        self.target_net.load_state_dict(self.policy_net.state_dict())
 
-                # Update target network
-                if self.steps_done % self.target_update == 0:
-                    self.target_net.load_state_dict(self.policy_net.state_dict())
+                rewards_history.append(episode_reward)
+                avg_reward = np.mean(rewards_history)
 
-            rewards_history.append(episode_reward)
-            avg_reward = np.mean(rewards_history)
+                # Periodic cleanup
+                if episode % 100 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
-            # Save model periodically
-            if episode % 1000 == 0:
-                model_path = os.path.join('models', f'dqn_episode_{episode}.pth')
-                torch.save({
-                    'episode': episode,
-                    'model_state_dict': self.policy_net.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'reward': episode_reward,
-                }, model_path)
-                print(f"Model saved to {model_path}")
+                # Save model periodically
+                if episode % 1000 == 0:
+                    self.clear_memory()  # Clear memory before saving
+                    model_path = os.path.join('models', f'dqn_episode_{episode}.pth')
+                    torch.save({
+                        'episode': episode,
+                        'model_state_dict': self.policy_net.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'reward': episode_reward,
+                    }, model_path)
 
-            # Save model when we achieve best episode reward
-            if episode_reward > best_reward:
-                best_reward = episode_reward
-                best_model_path = os.path.join('models', 'dqn_best.pth')
-                torch.save({
-                    'episode': episode,
-                    'model_state_dict': self.policy_net.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'reward': episode_reward,
-                }, best_model_path)
-                print(f"New best reward achieved: {best_reward:.2f}")
+                if episode_reward > best_reward:
+                    best_reward = episode_reward
+                    best_model_path = os.path.join('models', 'dqn_best.pth')
+                    torch.save({
+                        'episode': episode,
+                        'model_state_dict': self.policy_net.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'reward': episode_reward,
+                    }, best_model_path)
+                    print(f"New best model saved at episode {episode} with reward {episode_reward:.2f}")
 
-            if (episode + 1) % 100 == 0:
-                print(f"Episode {episode + 1}/{num_episodes} - "
-                      f"Reward: {episode_reward:.2f} - "
-                      f"Average Reward (100 ep): {avg_reward:.2f} - "
-                      f"Best Reward: {best_reward:.2f} - "
-                      f"Epsilon: {self.current_epsilon:.7f} - "
-                      f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.7f}")
+                if (episode + 1) % 100 == 0:
+                    print(f"Episode {episode + 1}/{num_episodes} - "
+                          f"Reward: {episode_reward:.2f} - "
+                          f"Average Reward (100 ep): {avg_reward:.2f} - "
+                          f"Best Reward: {best_reward:.2f} - "
+                          f"Epsilon: {self.current_epsilon:.7f} - "
+                          f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.7f}")
 
-            self.update_hyperparameters()
+                self.update_hyperparameters()
+
+        except KeyboardInterrupt:
+            print("\nTraining interrupted. Cleaning up...")
+            self.clear_memory()
+
+        finally:
+            self.clear_memory()
 
 
 def main():
     env = gym.make("FlappyBird-v0", render_mode="rgb_array", use_lidar=False)
     agent = DQNAgent(env)
-    agent.train(start_episode=None)
-    env.close()
+
+    try:
+        agent.train(start_episode=10000)
+    finally:
+        env.close()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

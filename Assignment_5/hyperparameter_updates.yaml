@@ -5,7 +5,7 @@ updates:
     value: 0
   epsilon_decay:
     action: mul
-    value: 0.5
+    value: 1
   learning_rate:
     action: mul
-    value: 1
+    value: 0.5
