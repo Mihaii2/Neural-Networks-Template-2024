@@ -65,7 +65,7 @@ class FrameStack:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity=10000):  # Reduced capacity
+    def __init__(self, capacity=50000):
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
@@ -131,11 +131,11 @@ class DQNAgent:
         self.batch_size = 32
         self.gamma = 0.99
         self.epsilon_start = 0.2
-        self.epsilon_end = 0.05
-        self.epsilon_decay = 300
+        self.epsilon_end = 0.001
+        self.epsilon_decay = 200
         self.current_epsilon = self.epsilon_start
         self.target_update = 1000
-        self.frame_skip = 3
+        self.frame_skip = 0
 
         self.steps_done = 0
 
@@ -277,7 +277,7 @@ class DQNAgent:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def train(self, num_episodes=2000000, start_episode=None, load_existing=True):
+    def train(self, num_episodes=10000, start_episode=None, load_existing=True):
         os.makedirs('models', exist_ok=True)
         os.makedirs('images', exist_ok=True)
 
@@ -312,12 +312,16 @@ class DQNAgent:
                 while not done:
                     action = self.select_action(state)
 
-                    skip_reward = 0
-                    for _ in range(self.frame_skip):
-                        next_state, reward, done, truncated, _ = self.env.step(action)
-                        skip_reward += reward
+                    # Take at least one step regardless of frame_skip
+                    next_state, reward, done, truncated, _ = self.env.step(action)
+                    skip_reward = reward
+
+                    # Additional frame skips if frame_skip > 0
+                    for _ in range(max(0, self.frame_skip - 1)):
                         if done:
                             break
+                        next_state, reward, done, truncated, _ = self.env.step(action)
+                        skip_reward += reward
 
                     next_frame = preprocess_image(self.env.render())
                     self.frame_stack.push(next_frame)
@@ -343,7 +347,7 @@ class DQNAgent:
                         torch.cuda.empty_cache()
 
                 # Save model periodically
-                if episode % 1000 == 0:
+                if episode % 100 == 0:
                     self.clear_memory()  # Clear memory before saving
                     model_path = os.path.join('models', f'dqn_episode_{episode}.pth')
                     torch.save({
@@ -352,6 +356,7 @@ class DQNAgent:
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'reward': episode_reward,
                     }, model_path)
+                    print(f"Model saved at episode {episode}")
 
                 if episode_reward > best_reward:
                     best_reward = episode_reward
@@ -362,7 +367,7 @@ class DQNAgent:
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'reward': episode_reward,
                     }, best_model_path)
-                    print(f"New best model saved at episode {episode} with reward {episode_reward:.2f}")
+                    print(f"New best model saved. Episode {episode} with reward {episode_reward:.2f}")
 
                 if (episode + 1) % 100 == 0:
                     print(f"Episode {episode + 1}/{num_episodes} - "
@@ -387,7 +392,7 @@ def main():
     agent = DQNAgent(env)
 
     try:
-        agent.train(start_episode=10000)
+        agent.train(start_episode=None)
     finally:
         env.close()
         gc.collect()
