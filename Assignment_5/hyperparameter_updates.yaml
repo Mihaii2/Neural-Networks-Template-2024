@@ -1,8 +1,8 @@
 status: Ignore
 updates:
   epsilon:
-    action: add
-    value: 0.01
+    action: sub
+    value: 0.002
   epsilon_decay:
     action: mul
     value: 1
