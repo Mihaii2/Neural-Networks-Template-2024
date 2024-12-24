@@ -130,9 +130,9 @@ class DQNAgent:
 
         self.batch_size = 32
         self.gamma = 0.99
-        self.epsilon_start = 0.2
-        self.epsilon_end = 0.001
-        self.epsilon_decay = 200
+        self.epsilon_start = 0.3
+        self.epsilon_end = 0.01
+        self.epsilon_decay = 200000
         self.current_epsilon = self.epsilon_start
         self.target_update = 1000
         self.frame_skip = 0
@@ -345,6 +345,16 @@ class DQNAgent:
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+
+                    # Automatically adjust epsilon based on average reward
+                    if len(rewards_history) == 100:  # Only adjust after we have 100 episodes
+                        if avg_reward > 20:
+                            self.current_epsilon = min(1.0, self.current_epsilon + 0.005)
+                            print(f"Average reward above 20, increasing epsilon to {self.current_epsilon:.3f}")
+
+                        elif avg_reward < 10:
+                            self.current_epsilon = max(self.epsilon_end, self.current_epsilon - 0.005)
+                            print(f"Average reward below 10, decreasing epsilon to {self.current_epsilon:.3f}")
 
                 # Save model periodically
                 if episode % 100 == 0:

@@ -2,10 +2,10 @@ status: Ignore
 updates:
   epsilon:
     action: add
-    value: 0
+    value: 0.01
   epsilon_decay:
     action: mul
     value: 1
   learning_rate:
     action: mul
-    value: 0.5
+    value: 1
