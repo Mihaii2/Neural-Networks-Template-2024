@@ -15,17 +15,63 @@ The implementation uses a Deep Q-Network (DQN) with the following structure:
    - Hidden layer: 512 neurons with LeakyReLU(0.01)
    - Output layer: 2 neurons (representing actions)
 
-### Key Components
+### Q-Learning Algorithm Implementation
+The implementation follows the Deep Q-Learning algorithm with several modern improvements:
 
-1. **Frame Stack**:
-   - Maintains a stack of 4 consecutive frames
-   - Used to capture temporal information and motion
-   - Each frame is preprocessed to 84x84 grayscale
+1. **Q-Learning Core Concepts**:
+   - The network learns to approximate Q(s,a): the expected future reward for taking action a in state s
+   - For each state, the network outputs Q-values for all possible actions
+   - Actions are selected using an epsilon-greedy policy:
+     ```python
+     if random.random() < epsilon:
+         return random.randint(0, 1)  # Explore
+     else:
+         q_values = policy_net(state)
+         return q_values.max(1)[1].item()  # Exploit
+     ```
 
-2. **Replay Buffer**:
-   - Capacity: 50,000 transitions
-   - Stores (state, action, reward, next_state, done) tuples
-   - Implements experience replay for stable learning
+2. **Experience Replay**:
+   - Transitions (state, action, reward, next_state, done) are stored in replay buffer
+   - Random sampling breaks correlation between consecutive samples
+   - Implementation details:
+     ```python
+     def optimize_model(self):
+         # Sample random batch
+         states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
+         
+         # Compute Q(s_{t+1}, a) for all actions
+         next_q_values = self.target_net(next_states).max(1)[0]
+         
+         # Compute expected Q values
+         expected_q_values = rewards + self.gamma * next_q_values * (1 - dones)
+         
+         # Compute current Q values
+         current_q_values = self.policy_net(states).gather(1, actions)
+         
+         # Compute loss and optimize
+         loss = nn.MSELoss()(current_q_values, expected_q_values)
+         self.optimizer.zero_grad()
+         loss.backward()
+         self.optimizer.step()
+     ```
+
+3. **Target Network**:
+   - Separate network for generating target Q-values
+   - Updated periodically (every 1000 steps) to maintain stability
+   - Prevents rapid oscillation of the Q-values during training
+
+4. **Frame Stacking**:
+   - Maintains history of 4 frames to capture temporal information
+   - Essential for understanding motion in the game
+   - Implementation:
+     ```python
+     class FrameStack:
+         def __init__(self, size=4):
+             self.frames = deque(maxlen=size)
+         
+         def get_state(self):
+             return torch.cat(list(self.frames), dim=1)  # [1, 4, 84, 84]
+     ```
 
 ## Hyperparameters and Training Configuration
 
