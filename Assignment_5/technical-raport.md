@@ -36,10 +36,47 @@ The implementation uses a Deep Q-Network (DQN) with the following structure:
 - Initial epsilon: 0.4
 - Target network update frequency: 1000 steps
 
-### Epsilon Decay Strategy
-- Starting epsilon: 0.05
-- Minimum epsilon: 0.01
-- Decay period: 200,000 steps
+### Manual Hyperparameter Tuning During Runtime
+The implementation supports dynamic hyperparameter adjustments through a YAML configuration file (`hyperparameter_updates.yaml`), allowing real-time parameter tuning without stopping the training:
+
+```yaml
+status: Update/Ignore  # Controls whether updates should be applied
+updates:
+  epsilon:
+    action: sub/add/mul  # Type of operation
+    value: 0.002        # Amount to adjust
+  epsilon_decay:
+    action: mul
+    value: 1
+  learning_rate:
+    action: mul/add/sub
+    value: 1
+```
+
+Features:
+- Parameters can be modified while the model is training
+- Supports three types of operations: addition, subtraction, and multiplication
+- Adjustable parameters include:
+  - Epsilon (exploration rate)
+  - Epsilon decay rate
+  - Learning rate
+- Status flag prevents repeated application of the same updates
+- Changes are logged to track parameter evolution
+
+### Automatic Epsilon Tweaking
+The implementation includes an automatic epsilon adjustment mechanism that maintains the average reward between 10 and 20:
+- Every 100 episodes, the system evaluates the average reward
+- If average reward > 20: Increase epsilon by 0.005 (max 1.0)
+- If average reward < 10: Decrease epsilon by 0.005 (min epsilon_end)
+- This adaptive approach ensures optimal exploration-exploitation balance
+- Code implementation:
+```python
+if len(rewards_history) == 100:  # Only adjust after we have 100 episodes
+    if avg_reward > 20:
+        self.current_epsilon = min(1.0, self.current_epsilon + 0.005)
+    elif avg_reward < 10:
+        self.current_epsilon = max(self.epsilon_end, self.current_epsilon - 0.005)
+```
 
 ## Experimental Results and Optimization
 
